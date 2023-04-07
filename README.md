@@ -1,6 +1,6 @@
 # Employee turnover prediction (M2 Data Science 2022/2023)
 
-Frequent employment turnover can create a major loss in the company. We want to predict an employee’s risk of quitting the company, for example, within a year. To do this, we will compare survival analysis methods, including Cox models and Survival Random Forests.
+Frequent employment turnover can create a major loss in the company. We want to predict an employee’s risk of quitting the company, for example, within a year. To do this, we will use and compare survival analysis methods such as Cox models and Survival Random Forests.
 
 - The report is accessible [here](https://github.com/DataSaiyentist/Employee_turnover/blob/main/report.pdf).
 - An online version of the work is also available via [https://datasaiyentist.github.io/Employee_turnover](https://datasaiyentist.github.io/Employee_turnover/).
