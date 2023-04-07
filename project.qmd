@@ -1,0 +1,726 @@
+---
+title: "Employee turnover prediction"
+author: "Data Saiyentist"
+format: 
+  html:
+    df-print: paged
+    code-fold: True
+    toc : True
+    toc-float: True
+editor: visual
+---
+
+## Introduction
+
+One challenge that large organizations face today is the problem of understanding and predicting which employees are going to leave the business, called **employee turnover prediction**. Indeed, if you have a large workforce, then you may want to be able to **predict which employees are at risk of leaving at any given time, how long they are expected to stay**, and get a hint of which interventions may have a chance of reducing attrition (of valuable employees). Furthermore, **frequent employment turnover can create a major money loss \[1\]** in the company. So you want to identify and address quickly the issues which cause employees to leave from your company.
+
+Survival Analysis is one of the best approach to predict employee turnover. Indeed, contrary to classification methods, we would be able to predict individual quitting risk.
+
+### Packages
+
+```{r}
+#| code-fold: false
+#| warning: false
+
+library(tidyverse)
+library(formatR)
+library(corrplot)
+library(RColorBrewer)
+library(survival)
+library(ggfortify)
+library(caret)
+library(riskRegression)
+library(stringr)
+library(zoo)
+library(randomForestSRC)
+```
+
+### Presentation of the dataset
+
+Here is the dataset we will study \[2\] in R :
+
+```{r}
+# Dataset importation
+turnover <- read.csv("turnover2.csv", sep = ";", header = TRUE)
+
+# Conversion of categorical variables into "factors"
+turnover <- turnover %>% mutate(gender = as.factor(gender),
+                                industry = as.factor(industry),
+                                profession = as.factor(profession),
+                                traffic = as.factor(traffic),
+                                coach = as.factor(coach),
+                                head_gender = as.factor(head_gender),
+                                greywage = as.factor(greywage),
+                                Transportation = as.factor(Transportation)) %>%
+                                                 rename(transport = Transportation)
+
+# First rows of the dataset
+# glimpse(turnover)
+
+turnover
+```
+
+And here are the features' description :
+
+- `duration` : Experience in months.
+- `event` : Censorship flag (1 if quit, 0 otherwise).
+- `gender` : Gender (`f` for female or `m` for male).
+- `age` : Age in years.
+- `industry` : Employee’s industry (`Agriculture`, `Banks`, `Building`, `Consult`, `HoReCa`, `IT`, `manufacture`, `Mining`, `Pharma`, `PowerGeneration`, `RealEstate`, `Retail`, `State`, `Telecom`, `transport`, `etc`).
+- `profession` : Employee’s profession (`Accounting`, `BusinessDevelopment`, `Commercial`, `Consult`, `Engineer`, `Finanñe`, `HR`, `IT`, `Law`, `manage`, `Marketing`, `PR`, `Sales`, `Teaching`, `etc`).
+- `traffic` : How employee came to the company :
+  - `advert` (direct contact of one’s own initiative).
+  - `recNErab` (direct contact on the recommendation of a friend, not an employ of the company).
+  - `referal` (direct contact on the recommendation of a friend, an employee of the company).
+  - `youjs` (applied on a job site).
+  - `KA` (recruiting agency brought).
+  - `rabrecNErab` (employer contacted on the recommendation of a person who knows the employee).
+  - `empjs` (employer reached on the job site).
+- `coach` : Presence of a coach on probation (`my head`, `yes` or `no`).
+- `head_gender` : Gender of the supervisor (`f` for female or `m` for male).
+- `greywage` : Whether the salary is fully registered with tax authorities (`white` otherwise `grey`).
+- `transport` : Employee’s means of transportation (`bus`, `car` or `foot`).
+- `extraversion`, `independ`, `selfcontrol`, `anxiety` and `novator` :\\ Scores between 1 and 10 given by Big Five Personality Test.
+
+## Data preprocessing
+
+Let's look for missing values and duplicate observations :
+
+```{r, tidy = TRUE}
+cat("Number of missing values :", sum(is.na(turnover)))
+cat("Number of duplicats: ", turnover %>% duplicated() %>% sum())
+```
+
+There are no missing values, but we have found some duplicates that need to be removed from our dataset in order to improve its quality.
+
+```{r}
+turnover <- unique(turnover)
+```
+
+## Exploratory data analysis
+
+This time, we will investigate our dataset thanks to data visualization methods. Indeed, it may help us to better understand its main characteristics, discover patterns, spot anomalies, test a hypothesis or check assumptions.
+
+First, we are interested in the variable `duration` according to the variable `event` :
+
+```{r}
+#| warning: false 
+
+turnover %>%
+  ggplot(aes(x = duration, color = factor(event),
+                              fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) +
+  geom_density(alpha = 0.05) + scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") + theme_minimal() + 
+  theme(legend.position = "top")
+```
+
+It seems that almost half of the data is censored. Let's verify this by hand :
+
+```{r, tidy = TRUE}
+n <- dim(turnover)[1]
+cat((n - sum(turnover$event))/n * 100, "% of observations are censored")
+```
+
+We must be careful with our analysis, because we could say without thinking that the number of employees who leave a company is equal to half of the total number of employees in a company. But this is not the case since turnover **also depends on other variables**. Despite the previous remark, let's plot histograms for continuous covariates and bar charts for discrete ones by coloring according to the value of `event` as follows :
+
+```{r, fig.ncol = 2}
+#| warning: false
+
+# Selection of covariates (that are only discrete)
+turnover.cat <- turnover %>% 
+                select_if(is.factor) %>% 
+                mutate(event = turnover$event)
+
+# Continuous covariates
+turnover %>% ggplot(aes(x = duration, color = factor(event), 
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) + 
+  geom_density(alpha = 0.05) +  
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover %>% ggplot(aes(x = event, color = factor(event),
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) + 
+  geom_density(alpha = 0.05) +
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") + 
+  theme_minimal() + theme(legend.position = "top")
+turnover %>% ggplot(aes(x = age, color = factor(event),
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) +
+  geom_density(alpha = 0.05) +
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") + 
+  theme_minimal() + theme(legend.position = "top")
+turnover %>% ggplot(aes(x = extraversion, color = factor(event), 
+                        fill = factor(event))) + 
+  geom_histogram(aes(y = ..density..), alpha = 0.5) + 
+  geom_density(alpha = 0.05) + scale_color_brewer(palette = "Dark2") + 
+  scale_fill_brewer(palette = "Dark2") + theme_minimal() + 
+  theme(legend.position = "top")
+turnover %>% ggplot(aes(x = independ, color = factor(event), 
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) + 
+  geom_density(alpha = 0.05) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") + 
+  theme_minimal() + theme(legend.position = "top")
+turnover %>% ggplot(aes(x = selfcontrol, color = factor(event),
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) +
+  geom_density(alpha = 0.05) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover %>% ggplot(aes(x = anxiety, color = factor(event),
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) +
+  geom_density(alpha = 0.05) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover %>% ggplot(aes(x = novator, color = factor(event),
+                        fill = factor(event))) +
+  geom_histogram(aes(y = ..density..), alpha = 0.5) +
+  geom_density(alpha = 0.05) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+
+# Discrete covariates
+turnover.cat %>% ggplot(aes(x = gender, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) +
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = industry, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = profession, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = traffic, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = coach, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = head_gender, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = greywage, color = factor(event),
+                            fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+turnover.cat %>% ggplot(aes(x = transport, color = factor(event), 
+                                     fill = factor(event))) +
+  geom_bar(alpha = 0.5) + 
+  scale_color_brewer(palette = "Dark2") + scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() + theme(legend.position = "top")
+```
+
+Finally, let's check for correlations between our variables :
+
+```{r, tidy = TRUE}
+# Other encoding of discrete variables
+turnover.num <- turnover.cat[-9]
+
+levels(turnover.num$gender) <- 1:length(levels(turnover.cat$gender))
+levels(turnover.num$industry) <- 1:length(levels(turnover.cat$industry))
+levels(turnover.num$profession) <- 1:length(levels(turnover.cat$profession))
+levels(turnover.num$traffic) <- 1:length(levels(turnover.cat$traffic))
+levels(turnover.num$coach) <- 1:length(levels(turnover.cat$coach))
+levels(turnover.num$head_gender) <- 1:length(levels(turnover.cat$head_gender))
+levels(turnover.num$greywage) <- 1:length(levels(turnover.cat$greywage))
+levels(turnover.num$transport) <- 1:length(levels(turnover.cat$transport))
+turnover.num <- as.data.frame(apply(turnover.num, 2, as.numeric))
+
+turnover.num <- cbind(turnover.num, turnover %>% select_if(is.numeric))
+
+# Correlation matrix
+corrplot(cor(turnover.num), col = brewer.pal(10, 'BrBG'), method = "square", diag = FALSE)
+```
+
+Actually, our approach (ie. converting discrete variables into continuous ones to compute the matrix of correlation) might be wrong. Yet, it may give us a quick intuition about variables correlation. By the way, we notice that there aren't covariates that are correlated significantly (ie. extreme values). Consequently, we decided to conserve all features in the dataset.
+
+## Survival & longitudinal data analysis
+
+Let's graphically represent the survival functions in the subgroups defined by all categorical variables of our dataset :
+
+```{r, fig.ncol = 2}
+v.cat <- colnames(turnover.cat[-9])
+
+# Survival function for each covariates
+for(v in v.cat){
+  f <- as.formula(paste("Surv(duration, event) ~ ", v))
+  
+  # print(f)
+  # print(survdiff(f, data = turnover))
+  print(autoplot(survfit(f, data = turnover)) +
+          theme_minimal() + ggtitle(paste("Survival plot for the", v, "variable")))
+  # cat("============================================================\n")
+}
+```
+
+We see that some variables might have an influence on employee turnover (like `industry`), because survival curves of subgroups seems to be different.
+
+However, we can do more than just analyze survival curves. Analysis like that represent a limited use case of the potential of survival analysis for turnover modeling, because we are using it for the aggregated level of the data. Instead of that, we can **create survival curves for individual cases, based on the effects of covariates and try to predict when employees leave**.
+
+### Hazard modeling
+
+Now, we will compare survival analysis methods, especially Cox model and survival Random Forests (from the library `randomForestSRC` \[3\]). 
+
+And to compare their performances, we will create a 75/25% partition of data in train and test samples via the `caret` library (Yet, the partitions are stratified well such that there is approximately the same percentage of censorship in train and test).
+
+```{r, tidy = TRUE}
+inTrain <- createDataPartition(y = turnover$event, p = 0.75, list = FALSE)
+
+# Stratified train-test split
+train <- turnover[inTrain, ]
+test <- turnover[- inTrain, ]
+
+# Verify whether the stratification was done correctly or not 
+cat(sum(train$event) / dim(train)[1] * 100, "% of train data is censored")
+cat(sum(test$event) / dim(test)[1] * 100, "% of test data is censored")
+```
+
+#### Cox model
+
+As a first hazard model, we might consider a **Cox model** with all variables as follows :
+
+```{r}
+cox.model <- coxph(Surv(duration, event) ~ ., data = train)
+summary(cox.model)
+cat("BIC =", BIC(cox.model))
+```
+
+But we can do better thanks to a forward selection in order to select a sparse subset of covariates (we chose wisely according to the BIC) :
+
+```{r}
+#| eval: false
+#| include: true
+
+# Forward selection ran by hand
+# Model with no covariate
+cox.model <- coxph(Surv(duration, event) ~ 1, data = train)
+
+cat("Surv(duration, event) ~ 1\n")
+print(summary(cox.model))
+cat("BIC =", BIC(cox.model))    # BIC = 4830.165
+cat("\n============================================================\n")
+
+v.all <- colnames(turnover)[3:16]
+
+# 1st iteration of forward selection
+for(v in v.all){
+  f <- as.formula(paste("Surv(duration, event) ~ ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 2nd iteration of forward selection/ with "profession"
+# BIC = 4892.65
+v.all <- v.all[-4]
+
+for(v in v.all){
+  f <- as.formula(paste("Surv(duration, event) ~ profession + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 3rd iteration of forward selection/ with "industry"
+# BIC = 4937.944
+v.all <- v.all[-3]
+
+for(v in v.all){
+  f <- as.formula(paste("Surv(duration, event) ~ profession + industry + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 4th iteration of forward selection/ with "coach"
+# BIC = 4949.908
+v.all <- v.all[-4]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 5th iteration of forward selection/ with "independ"
+# BIC = 4955.896
+v.all <- v.all[-8]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 6th iteration of forward selection/ with "head_gender"
+# BIC = 4961.574
+v.all <- v.all[-4]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 7th iteration of forward selection/ with "anxiety"
+# BIC = 4966.105
+v.all <- v.all[-8]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 8th iteration of forward selection/ with "transport"
+# BIC = 4969.996
+v.all <- v.all[-5]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 9th iteration of forward selection/ with "gender"
+# BIC = 4973.29
+v.all <- v.all[-1]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + gender + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 10th iteration of forward selection/ with "novator"
+# BIC = 4976.8
+v.all <- v.all[-6]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + gender + novator + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 11th iteration of forward selection/ with "extraversion"
+# BIC = 4981.899
+v.all <- v.all[-4]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + gender + novator + extraversion + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 12th iteration of forward selection/ with "selfcontrol"
+# BIC = 4987.378
+v.all <- v.all[-4]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + gender + novator + extraversion + selfcontrol + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# 13th iteration of forward selection/ with "traffic"
+# BIC = 4988.465
+v.all <- v.all[-2]
+
+for(v in v.all){
+  f <- as.formula(
+    paste("Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + gender + novator + extraversion + selfcontrol + traffic + ", v))
+  
+  print(f)
+  cox.model <- coxph(f, data = train)
+  print(summary(cox.model))
+  cat("BIC =", BIC(cox.model))
+  cat("\n============================================================\n")
+}
+
+# We stop, because the BIC criterion doesn't improve by adding covariates to the model 
+```
+
+Thus, we have the following model :
+
+```{r}
+#| code-fold: false
+
+cox.model <- coxph(Surv(duration, event) ~ profession + industry + coach + independ + head_gender + anxiety + transport + gender + novator + extraversion + selfcontrol + traffic, data = train, x = TRUE, y = TRUE)
+summary(cox.model)
+cat("BIC =", BIC(cox.model))
+```
+
+The likelihood ratio p-value is significantly lower than 5%. So the model is different from the Null model (ie. model without any covariate).
+
+Then for model comparison, we computed the Brier score \[4\] (thanks to `riskRegression` library \[5\]) as a function of time :
+
+```{r}
+cox.brier <- Score(list("final_cox" = cox.model), 
+                   formula = Surv(duration, event) ~ 1, data = test, 
+                   metrics = "brier", times = sort(unique(test$duration)))
+
+cox.brier$Brier$score %>% select(model, times, Brier) %>%
+  ggplot(aes(x = times, y = Brier, color = model)) +
+  geom_line() + 
+  scale_colour_manual(values=c("darkgrey", "orange")) +
+  theme_minimal() +
+  ggtitle("Brier Score for the Cox Model") + xlab("Time")
+```
+
+But, we prefer to compute the **Integrated Brier Score** (IBS) \[4\] that provides a better overview of model performances (we will later compare this value to the IBS given by the Random Forest). The IBS was computed using the formula in \[4\], especially using the trapezoid method \[6\] to approximate the integral of Brier score (ie. the area under the curves) :
+
+```{r}
+#| warning: false
+
+# Scores extraction
+cox.brier.data <- summary(Score(list("final_cox" = cox.model), 
+                               formula = Surv(duration, event) ~ 1, 
+                               data = test, metrics = "brier", 
+                               times = sort(unique(test$duration))), 
+                         models = "final_cox")$score[, - c("Model")]
+colnames(cox.brier.data) <- c("times", "brier")
+
+# Removal of confidence interval
+extract_brier <- function(x) {
+  if (str_sub(x, 2, 2) == ".") { return(str_sub(x, 1, 3)) }
+  else { return(str_sub(x, 1, 4)) }
+}
+cox.brier.data$brier <- as.numeric(lapply(cox.brier.data$brier, extract_brier))
+
+# Approximation of the area under the curve with trapezoidal method
+trapezoidal <- function(x, y) {
+  return(sum(diff(x) * (head(y, -1) + tail(y, -1)))/2)
+}
+
+# Computation of the Integrated Brier Score
+cox.brier.ibs <- trapezoidal(cox.brier.data$times,
+                             cox.brier.data$brier)/tail(cox.brier.data$times, 1)
+cat("Integrated Brier Score of Cox model =", cox.brier.ibs)
+```
+
+#### Random Forest
+
+Here, we will consider a **Random Forest** for survival analysis purposes :
+
+```{r}
+#| code-fold: false
+
+rf.model <- rfsrc(Surv(duration, event) ~ ., data = train)
+
+# Visualization of the importance
+rf.importance <- data.frame(colnames(turnover)[3:16],
+                            vimp(rf.model)$importance)
+rownames(rf.importance) <- 1:(dim(rf.importance)[1])
+colnames(rf.importance) <- c("variable", "importance")
+
+ggplot(rf.importance, aes(variable, importance, fill = variable)) + 
+  geom_bar(stat = "identity", alpha = 0.5) + coord_flip() + theme_minimal() +
+  geom_text(aes(label = sprintf("%0.3f", round(importance, digits = 3))), 
+            color = "black", size = 3.4, hjust = 1.1)
+  
+```
+
+Above, the importance given by our Random Forest gives us an insight into the most "important" variables. In that case, we notice that the main variables are not necessarily the same as the sparse variables given by Cox model (with a forward selection).
+
+Then likewise, we computed the Brier score as a function of time :
+
+```{r}
+rf.brier <- Score(list("rfsrc" = rf.model), 
+                  formula = Surv(duration, event) ~ 1, data = test, 
+                  metrics = "brier", times = sort(unique(test$duration)))
+
+rf.brier$Brier$score %>% 
+  select(model, times, Brier) %>%
+  ggplot(aes(x = times, y = Brier, color = model)) +
+  geom_line() +
+  scale_colour_manual(values=c("darkgrey", "orange")) +
+  theme_minimal() +
+  ggtitle("Brier Score for the Random Forest") + xlab("Time")
+```
+
+And we also obtained the following IBS :
+
+```{r}
+#| warning: false
+
+# Scores extraction
+rf.brier.data <- summary(Score(list("rfsrc" = rf.model), 
+                               formula = Surv(duration, event) ~ 1, 
+                               data = test, metrics = "brier", 
+                               times = sort(unique(test$duration))), 
+                         models = "rfsrc")$score[, - c("Model")]
+colnames(rf.brier.data) <- c("times", "brier")
+
+# Removal of confidence interval
+rf.brier.data$brier <- as.numeric(lapply(rf.brier.data$brier, extract_brier))
+
+# Computation of the Integrated Brier Score
+rf.brier.ibs <- trapezoidal(rf.brier.data$times,
+                            rf.brier.data$brier)/tail(rf.brier.data$times, 1)
+cat("Integrated Brier Score of Random Forest =", rf.brier.ibs)
+```
+
+Therefore, we decided to take the model given by survival Random Forest, because it gave us the lowest IBS (`r rf.brier.ibs` < `r cox.brier.ibs`).
+
+### Predictions
+
+In this final section, let's test the Random Forest (with different `industry`) on the following profiles :
+
+- Considering an employee whose features are Female of age 30, referred by an employee of the company (`referral`), profession `HR`, commuting by bus, having a coach during the probation, with male supervisor, whose characteristic scores are 5 for all categories, let's give an estimate of the probability that this employee will stay for longer than 3 years.
+- Considering another employee with the same profile but who has already worked for one year, let's give an estimate of the probability that this employee will stay for another 2 years.
+
+```{r}
+# Imputation of the first individual
+new_individu <- data.frame(gender = "f", age = 30, traffic = "referal",
+                           profession = "HR", transport = "bus", coach = "yes",
+                           greywage = "white", head_gender = "m", 
+                           extraversion = 5, independ = 5, selfcontrol = 5,
+                           anxiety = 5, novator = 5, industry = " HoReCa",
+                           duration = 0, event = 0)
+
+industry <- levels(turnover$industry)
+new_individu.surv <- NULL
+
+# Random Forest with all the dataset
+final.model <- rfsrc(Surv(duration, event) ~ ., data = turnover)
+
+# Survival computation
+for (i in industry) {
+  new_individu$industry <- i
+  p <- predict(final.model, new_individu)
+  # Return the index which gives the closest time to 36 months
+  j <- which(p$time.interest > 36)[1] - 1
+  new_individu.surv <- c(new_individu.surv, p$survival[j])
+}
+
+# Visualization of survival probability according industries
+industry.surv <- data.frame(industry, new_individu.surv)
+rownames(industry.surv) <- 1:(dim(industry.surv)[1])
+colnames(industry.surv) <- c("industry", "survival")
+
+p1 <- industry.surv[industry.surv$industry=="IT", "survival"]
+
+ggplot(industry.surv, aes(industry, survival, fill = industry)) + 
+  geom_bar(stat = "identity", alpha = 0.5) + coord_flip() + theme_minimal() +
+  ggtitle("The probability that the employee will stay for longer than 3 years") +
+  geom_text(aes(label = sprintf("%0.3f", round(survival, digits = 3))), 
+            color = "black", size = 3.5, hjust = 1.1) + ylab("Probability")
+
+# Imputation of the second individual
+new_individu2 <- data.frame(gender = "f", age = 30, traffic = "referal",
+                           profession = "HR", transport = "bus", coach = "yes",
+                           greywage = "white", head_gender = "m", 
+                           extraversion = 5, independ = 5, selfcontrol = 5,
+                           anxiety = 5, novator = 5, industry = " HoReCa",
+                           duration = 12, event = 0)
+
+new_individu2.surv <- NULL
+
+# Survival computation
+for (i in industry) {
+  new_individu2$industry <- i
+  p <- predict(final.model, new_individu2)
+  j <- which(p$time.interest > 24)[1] - 1
+  new_individu2.surv <- c(new_individu2.surv, p$survival[j])
+}
+
+# Visualization of survival probability according industries
+industry.surv <- data.frame(industry, new_individu2.surv)
+rownames(industry.surv) <- 1:(dim(industry.surv)[1])
+colnames(industry.surv) <- c("industry", "survival")
+
+p2 <- industry.surv[industry.surv$industry=="IT", "survival"]
+
+ggplot(industry.surv, aes(industry, survival, fill = industry)) + 
+  geom_bar(stat = "identity", alpha = 0.5) + coord_flip() + theme_minimal() +
+  ggtitle("The probability that the employee will stay for another 2 years") +
+  geom_text(aes(label = sprintf("%0.3f", round(survival, digits = 3))), 
+            color = "black", size = 3.5, hjust = 1.1) + ylab("Probability")
+```
+
+We observe that, for both profiles, the industry has an effect on the probabilities. More generally, this is the main reason why we should not decide beforehand (like in EDA section) whether a covariate has an influence or not on a survival problem.
+
+Now let's fix their `industry` profile as `IT` for instance. In theory, we might think that nowadays, the longer you stay in a company, the higher chances of leaving are (for example, you want to move elsewhere, to work for another company, aso.). Yet, we notice the inverse in practice (with our case), because the second probability is higher than the first one (`r p2` \> `r p1`). In other words, a person that has already worked one year has a high chance to stay two years within the same company (ie. three years in total).  
+As a consequence, our predictions are not consistent with the reality. This may be due to the fact that the data is biased or not up-to-date with the current generations.
+
+## Conclusion
+
+Turnover calculations are an important metric in business. The benefits of applying an employee turnover prediction model like this extend beyond its pure prediction capabilities towards insights that can modify the operations of the organization as a whole. And the cost savings to the organization are two-fold as HR professionals can use the model's explanations to develop retention policies across the business and also target high risk individuals with retention initiatives.
+
+## References
+
+\[1\] [Work Institute's 2019 retention report](https://info.workinstitute.com/hubfs/2019%20Retention%20Report/Work%20Institute%202019%20Retention%20Report%20final-1.pdf)  
+\[2\] [Employee turnover dataset shared from Edward Babushkin's blog](https://edwvb.blogspot.com/2017/10/employee-turnover-how-to-predict-individual-risks-of-quitting.html?m=1)  
+\[3\] [randomForestSRC documentation](https://www.randomforestsrc.org/articles/getstarted.html)  
+\[4\] [Brier score and IBS documentation from Python library `pysurvival`](https://square.github.io/pysurvival/metrics/brier_score.html)  
+\[5\] [riskRegression documentation](https://www.rdocumentation.org/packages/riskRegression/versions/2022.03.22)  
+\[6\] [A brief explanation of trapezoid method](https://kitchingroup.cheme.cmu.edu/blog/2013/02/23/The-trapezoidal-method-of-integration/)
